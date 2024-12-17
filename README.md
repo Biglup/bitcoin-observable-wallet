@@ -158,7 +158,7 @@ This PoC demonstrates a fully functional Bitcoin wallet capable of:
 - Building, signing, and submitting transactions.
 - Polling transaction status for confirmations.
 
-- You can extend this PoC further to include more advanced features, such as:
+You can extend this PoC further to include more advanced features, such as:
 
 - Multi-address discovery
 - Fee estimation
