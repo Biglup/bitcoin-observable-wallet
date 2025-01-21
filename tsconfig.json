@@ -3,7 +3,11 @@
     "composite": true,
     "module": "commonjs",
     "target": "es2020",
-    "lib": ["es2020", "dom", "esnext"],
+    "lib": [
+      "es2020",
+      "dom",
+      "esnext"
+    ],
     "esModuleInterop": true,
     "moduleResolution": "node",
     "declaration": true,
@@ -18,10 +22,15 @@
     "strictPropertyInitialization": false,
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "resolveJsonModule": true
   },
   "tsc-alias": {
     "resolveFullPaths": true,
     "verbose": false
-  }
+  },
+  "include": [
+    "src/**/*",
+    "src/types.d.ts"
+  ]
 }

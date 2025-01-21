@@ -1,1 +1,1 @@
-export * from './ObservableBitcoinWallet';
+export * from './BitcoinWallet';

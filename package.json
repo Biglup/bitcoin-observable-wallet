@@ -11,6 +11,9 @@
     "axios": "^1.7.9",
     "bip39": "^3.1.0",
     "bitcoinjs-lib": "^6.1.7",
+    "chacha": "^2.1.0",
+    "get-random-values": "^3.0.0",
+    "pbkdf2": "^3.1.2",
     "rxjs": "^7.8.1",
     "tiny-secp256k1": "^2.2.3",
     "typescript": "^5.4.5"
@@ -19,6 +22,7 @@
     "@atixlabs/eslint-config": "^1.2.3",
     "@types/jest": "^26.0.24",
     "@types/node": "^18.11.8",
+    "@types/pbkdf2": "^3.1.2",
     "@typescript-eslint/eslint-plugin": "^5.27.1",
     "@typescript-eslint/parser": "^5.27.1",
     "eslint": "^7.32.0",

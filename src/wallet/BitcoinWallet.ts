@@ -1,25 +1,26 @@
 import { BlockchainDataProvider, BlockInfo, TransactionHistoryEntry, UTxO } from './../providers';
-import { BehaviorSubject, interval, lastValueFrom, of, startWith } from 'rxjs';
+import { BehaviorSubject, interval, of, startWith } from 'rxjs';
 import { catchError, map, switchMap } from 'rxjs/operators';
 import {
-  AddressType,
-  ChainType,
+  AddressType, BitcoinWalletInfo,
   deriveAddressByType,
   DerivedAddress,
-  deriveElectrumSeed,
-  deriveKeyPair,
-  derivePublicKey,
-  KeyPair
+  KeyPair, Network, toUint8Array
 } from '../common';
 import * as bitcoin from 'bitcoinjs-lib';
 import { payments, Psbt, Signer } from 'bitcoinjs-lib';
 import * as ecc from 'tiny-secp256k1';
+import { emip3decrypt } from '../crypto';
 
 bitcoin.initEccLib(ecc);
 
 export class CustomSigner implements Signer {
   publicKey: Buffer;
 
+  /**
+   * Creates a new CustomSigner instance.
+   * @param keyPair - The key pair to use for signing.
+   */
   constructor(private keyPair: KeyPair) {
     if (!keyPair.privateKey) {
       throw new Error('Private key is required to sign transactions.');
@@ -49,50 +50,56 @@ export class CustomSigner implements Signer {
   getPublicKey(): Buffer {
     return this.publicKey;
   }
+
+  /**
+   * Clears the private key from memory.
+   *
+   * This is a security measure to prevent the private key from being exposed in memory.
+   */
+  clearSecrets() {
+    this.keyPair.privateKey.fill(0);
+  }
 }
 
-export class ObservableBitcoinWallet {
+export class BitcoinWallet {
   private lastKnownBlock: BlockInfo | null = null;
   private transactionHistory: TransactionHistoryEntry[] = [];
   private readonly pollInterval: number;
-  private readonly reorgSafeDepth: number;
+  private readonly historyDepth: number;
   private provider: BlockchainDataProvider;
-  private mnemonics: string;
+  private info: BitcoinWalletInfo;
   private network: bitcoin.networks.Network;
 
   public transactionHistory$: BehaviorSubject<TransactionHistoryEntry[]> = new BehaviorSubject(new Array<TransactionHistoryEntry>());
-  public addresses$: BehaviorSubject<DerivedAddress[]> = new BehaviorSubject(new Array<DerivedAddress>());
+  public address: DerivedAddress;
   public utxos$: BehaviorSubject<UTxO[]> = new BehaviorSubject(new Array<UTxO>());
   public balance$: BehaviorSubject<bigint> = new BehaviorSubject(0n);
-  public syncProgress$: BehaviorSubject<number> = new BehaviorSubject(0);
 
   constructor(
     provider: BlockchainDataProvider,
     pollInterval: number = 300000,
-    reorgSafeDepth: number = 20,
-    mnemonics: string,
-    network: bitcoin.networks.Network = bitcoin.networks.testnet
+    historyDepth: number = 20,
+    info: BitcoinWalletInfo,
+    network: Network = Network.Testnet
   ) {
-    this.network = network;
+    this.network = network === Network.Mainnet ? bitcoin.networks.bitcoin : bitcoin.networks.testnet;
 
     this.pollInterval = pollInterval;
-    this.reorgSafeDepth = reorgSafeDepth;
+    this.historyDepth = historyDepth;
     this.provider = provider;
-    this.mnemonics = mnemonics;
+    this.info = info;
 
-    const seed = deriveElectrumSeed(mnemonics);
-    const publicKey = derivePublicKey(seed, AddressType.ElectrumNativeSegWit, ChainType.External, 0);
-    const address = deriveAddressByType(publicKey, AddressType.ElectrumNativeSegWit, network);
+    const pubKey = Buffer.from(info.publicKeyHex, 'hex');
+    const address = deriveAddressByType(pubKey, AddressType.NativeSegWit, this.network);
 
-    this.addresses$.next([
+    this.address =
       {
         address,
-        addressType: AddressType.ElectrumNativeSegWit,
-        derivationPath: 'm/0\'/0/0'
-      }
-    ]);
+        addressType: AddressType.NativeSegWit,
+        derivationPath: info.derivationPath
+      };
 
-    this.startPolling([address]);
+    this.startPolling();
 
     this.utxos$
       .pipe(
@@ -103,12 +110,17 @@ export class ObservableBitcoinWallet {
       });
   }
 
+  /**
+   * Sends a transaction to the specified address.
+   *
+   * @param toAddress The recipient's address.
+   * @param amount The amount to send in satoshis.
+   */
   async send(toAddress: string, amount: bigint): Promise<string> {
-    const fixedFee = 500n; // Fixed fee in satoshis. Replace with actual fee estimation logic.
+    const fixedFee = 500n;
 
     try {
-      // Fetch available UTXOs
-      const utxos = await this.utxos$.value;
+      const utxos = this.utxos$.value;
 
       if (!utxos || utxos.length === 0) {
         throw new Error('No UTXOs available to fund the transaction.');
@@ -127,8 +139,11 @@ export class ObservableBitcoinWallet {
         throw new Error('Insufficient funds to cover the transaction and fees.');
       }
 
-      const seed = deriveElectrumSeed(this.mnemonics);
-      const keyPair = deriveKeyPair(seed, AddressType.ElectrumNativeSegWit, ChainType.External, 0);
+      const publicKey = Buffer.from(this.info.publicKeyHex, 'hex');
+      const encryptedPrivateKey = Buffer.from(this.info.encryptedPrivateKeyHex, 'hex');
+      const privateKey = Buffer.from(await emip3decrypt(new Uint8Array(encryptedPrivateKey), toUint8Array('password')));
+
+      const keyPair = { publicKey, privateKey };
 
       const psbt = new Psbt({ network: this.network });
 
@@ -137,7 +152,7 @@ export class ObservableBitcoinWallet {
           hash: utxo.txId,
           index: utxo.index,
           witnessUtxo: {
-            script: payments.p2wpkh({ pubkey: keyPair.publicKey, network: this.network }).output!,
+            script: payments.p2wpkh({ pubkey: publicKey, network: this.network }).output!,
             value: Number(utxo.amount)
           }
         });
@@ -149,29 +164,46 @@ export class ObservableBitcoinWallet {
       });
 
       const change = inputSum - amount - fixedFee;
+
       if (change > 0n) {
         psbt.addOutput({
-          address: payments.p2wpkh({ pubkey: keyPair.publicKey, network: this.network }).address!,
+          address: this.address.address,
           value: Number(change)
         });
       }
 
       psbt.signAllInputs(new CustomSigner(keyPair));
+
       psbt.finalizeAllInputs();
 
-      const rawTransaction = psbt.extractTransaction().toHex();
+      // clear secrets from memory
+      keyPair.privateKey.fill(0);
 
-      return await lastValueFrom(this.provider.submitTransaction(rawTransaction));
+      return psbt.extractTransaction().toHex();
     } catch (error) {
-      console.error('Failed to send transaction:', error.message);
-      throw error; // Rethrow to propagate the error to the caller
+      console.error('Failed to send transaction:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Submits a raw transaction to the blockchain for inclusion in a block.
+   *
+   * @param rawTransaction - The raw transaction data to be broadcast to the network.
+   */
+  public async submitTransaction(rawTransaction: string): Promise<string> {
+    try {
+      return await this.provider.submitTransaction(rawTransaction);
+    } catch (error) {
+      console.error('Failed to submit transaction:', error);
+      throw error;
     }
   }
 
   /**
    * Starts polling for new blocks and updating wallet state.
    */
-  private startPolling(addresses: string[]) {
+  private startPolling() {
     interval(this.pollInterval)
       .pipe(
         startWith(0),
@@ -185,7 +217,7 @@ export class ObservableBitcoinWallet {
         if (!latestBlockInfo) return;
 
         if (!this.lastKnownBlock || this.lastKnownBlock.hash !== latestBlockInfo.hash) {
-          await this.updateState(addresses, latestBlockInfo);
+          await this.updateState(latestBlockInfo);
         }
       });
   }
@@ -193,70 +225,14 @@ export class ObservableBitcoinWallet {
   /**
    * Updates the wallet state by fetching new transactions and UTxOs.
    */
-  private async updateState(addresses: string[], latestBlockInfo: BlockInfo): Promise<void> {
+  private async updateState(latestBlockInfo: BlockInfo): Promise<void> {
     this.lastKnownBlock = latestBlockInfo;
 
-    const startHeight = Math.max(
-      0,
-      this.lastKnownBlock.height - this.reorgSafeDepth
-    );
+    this.transactionHistory = await this.provider.getTransactions(this.address.address, 0, this.historyDepth, 0);
+    this.transactionHistory$.next(this.transactionHistory);
 
-    for (const address of addresses) {
-      /*
-      Blockstream provider does not support fetching transactions by block height.
-      this.transactionHistory = this.transactionHistory.filter(
-        (tx) => tx.blockHeight <= startHeight
-      );
-      this.transactionHistory.push(...newTransactions);
-      */
-
-      this.transactionHistory = await this.fetchRecentTransactions(address, startHeight, latestBlockInfo.height);
-      this.transactionHistory$.next(this.transactionHistory);
-
-      this.provider.getUTxOs(address).subscribe({
-        next: (utxos) => {
-          this.utxos$.next(utxos);
-        },
-        error: (err) => {
-          console.error(`Error fetching UTxOs for address ${address}:`, err);
-          this.utxos$.next([]);
-        }
-      });
-    }
-
+    const utxos = await this.provider.getUTxOs(this.address.address);
+    this.utxos$.next(utxos);
     this.lastKnownBlock = latestBlockInfo;
-    this.syncProgress$.next(100); // Dummy sync progress. Replace with actual progress tracking.
-  }
-
-  /**
-   * Fetches recent transactions for an address.
-   */
-  private async fetchRecentTransactions(
-    address: string,
-    startHeight: number,
-    endHeight: number
-  ): Promise<TransactionHistoryEntry[]> {
-    const limit = 50;
-    let offset = 0;
-    const transactions: TransactionHistoryEntry[] = [];
-
-    while (true) {
-      const page = await this.provider
-        .getTransactions(address, startHeight, limit, offset)
-        .toPromise();
-
-      const safePage = page ?? [];
-
-      transactions.push(...safePage);
-
-      if (safePage.length < limit) {
-        break;
-      }
-
-      offset += limit;
-    }
-
-    console.log(endHeight);
-    return transactions;
   }
 }

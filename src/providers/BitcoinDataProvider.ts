@@ -1,5 +1,3 @@
-import { Observable } from 'rxjs';
-
 /**
  * Represents basic information about a blockchain block.
  *
@@ -32,10 +30,10 @@ export enum TransactionStatus {
 }
 
 /**
- * Represents a single entry in the transaction history of an common.
+ * Represents a single entry in the transaction history of an address.
  *
- * @property {bigint} delta - The net change in balance for the common caused by this transaction.
- *                            A positive value indicates funds were received, while a negative value indicates funds were sent.
+ * @property {InputOutputEntry[]} inputs - The inputs of the transaction, detailing the source of funds.
+ * @property {InputOutputEntry[]} outputs - The outputs of the transaction, detailing the destination of funds.
  * @property {string} transactionHash - The unique identifier (hash) of the transaction.
  * @property {number} confirmations - The number of confirmations for the transaction.
  *                                    More confirmations indicate higher confidence that the transaction is finalized.
@@ -45,11 +43,23 @@ export enum TransactionStatus {
  * @property {number} blockHeight - The height of the block containing this transaction.
  */
 export type TransactionHistoryEntry = {
-  readonly delta: bigint;
+  readonly inputs: InputOutputEntry[];
+  readonly outputs: InputOutputEntry[];
   readonly transactionHash: string;
   readonly confirmations: number;
   readonly status: TransactionStatus;
   readonly blockHeight: number;
+};
+
+/**
+ * Represents a single input or output of a transaction.
+ *
+ * @property {string} address - The address involved in the transaction input or output.
+ * @property {bigint} satoshis - The amount in satoshis for this input or output.
+ */
+export type InputOutputEntry = {
+  readonly address: string;
+  readonly satoshis: bigint;
 };
 
 /**
@@ -74,17 +84,9 @@ export interface BlockchainDataProvider {
   /**
    * Fetches basic information about the last known block height and hash.
    *
-   * @returns {Observable<BlockInfo>} An observable that emits the current blockchain information.
+   * @returns {Promise<BlockInfo>} An observable that emits the current blockchain information.
    */
-  getLastKnownBlock(): Observable<BlockInfo>;
-
-  /**
-   * Fetches the balance of a specified common.
-   *
-   * @param {string} address - The blockchain common whose balance is to be retrieved.
-   * @returns {Observable<bigint>} An observable that emits the balance of the common in satoshis.
-   */
-  getAddressBalance(address: string): Observable<bigint>;
+  getLastKnownBlock(): Promise<BlockInfo>;
 
   /**
    * Fetches the transactions of a specified common.
@@ -93,7 +95,7 @@ export interface BlockchainDataProvider {
    * @param {number} [afterBlockHeight] - Fetch transactions that occurred after this block height (optional).
    * @param {number} [limit=50] - The maximum number of transactions to fetch (optional, default is 50).
    * @param {number} [offset=0] - The starting index for transactions (optional, default is 0).
-   * @returns {Observable<TransactionHistoryEntry[]>} An observable that emits a list of transactions
+   * @returns {Promise<TransactionHistoryEntry[]>} An observable that emits a list of transactions
    *                                                  associated with the common.
    */
   getTransactions(
@@ -101,23 +103,23 @@ export interface BlockchainDataProvider {
     afterBlockHeight?: number,
     limit?: number,
     offset?: number
-  ): Observable<TransactionHistoryEntry[]>;
+  ): Promise<TransactionHistoryEntry[]>;
 
   /**
    * Fetches the unspent transaction outputs (UTxOs) associated with a specified common.
    *
    * @param {string} address - The blockchain common whose UTxOs are to be retrieved.
-   * @returns {Observable<UTxO[]>} An observable that emits a list of UTxOs for the common.
+   * @returns {Promise<UTxO[]>} An observable that emits a list of UTxOs for the common.
    */
-  getUTxOs(address: string): Observable<UTxO[]>;
+  getUTxOs(address: string): Promise<UTxO[]>;
 
   /**
    * Submits a raw transaction to the blockchain for inclusion in a block.
    *
    * @param {string} rawTransaction - The raw transaction data to be broadcast to the network.
-   * @returns {Observable<string>} An observable that emits the transaction ID (hash) of the submitted transaction.
+   * @returns {Promise<string>} An observable that emits the transaction ID (hash) of the submitted transaction.
    */
-  submitTransaction(rawTransaction: string): Observable<string>;
+  submitTransaction(rawTransaction: string): Promise<string>;
 
   /**
    * Fetches the status of a specified transaction by its hash.
@@ -126,7 +128,7 @@ export interface BlockchainDataProvider {
    * The status can indicate if the transaction is pending, confirmed, or dropped.
    *
    * @param {string} txHash - The hash of the transaction to query.
-   * @returns {Observable<TransactionStatus>} An observable that emits the current status of the transaction.
+   * @returns {Promise<TransactionStatus>} An observable that emits the current status of the transaction.
    */
-  getTransactionStatus(txHash: string): Observable<TransactionStatus>;
+  getTransactionStatus(txHash: string): Promise<TransactionStatus>;
 }

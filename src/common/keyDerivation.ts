@@ -50,6 +50,45 @@ const derivationPaths = {
 };
 
 /**
+ * Represents the derivation paths for different Bitcoin address types.
+ *
+ * Hierarchical deterministic wallets (HD wallets) use standardized derivation paths
+ * to organize keys and addresses in a predictable way. These paths follow specific
+ * BIPs (Bitcoin Improvement Proposals) for compatibility across wallets.
+ *
+ * Key Standards:
+ * - **BIP-44**: Legacy addresses (P2PKH).
+ * - **BIP-49**: SegWit-compatible addresses (P2SH-P2WPKH).
+ * - **BIP-84**: Native SegWit addresses (P2WPKH).
+ * - **BIP-86**: Taproot addresses (P2TR).
+ * - **Electrum**: Custom path `m/0'` for Native SegWit in Electrum wallets.
+ */
+const testnetDerivationPaths = {
+  NativeSegWit: 'm/84\'/1\'/0\'',
+  SegWit: 'm/49\'/1\'/0\'',
+  Legacy: 'm/44\'/1\'/0\'',
+  Taproot: 'm/86\'/1\'/0\'',
+  ElectrumNativeSegWit: 'm/0\''
+};
+
+/**
+ * Derives a BIP-39-compatible seed from the given mnemonic and optional passphrase.
+ *
+ * @param {string} mnemonic - The BIP-39 mnemonic phrase (12, 15, 18, 21, or 24 words).
+ * @param {string} [passphrase=''] - An optional passphrase for seed derivation (default is an empty string).
+ * @returns {Buffer} The derived 64-byte BIP-39-compatible seed.
+ *
+ * @example
+ * const mnemonic = 'ranch someone rely gasp where sense plug trust salmon stand result parade';
+ * const seed = deriveBip39Seed(mnemonic);
+ * console.log(seed.toString('hex'));
+ */
+export const deriveBip39Seed = (mnemonic: string, passphrase: string = ''): Buffer => {
+  const salt = `mnemonic${passphrase}`;
+  return crypto.pbkdf2Sync(mnemonic, salt, 2048, 64, 'sha512');
+};
+
+/**
  * Derives the Electrum-compatible seed from the given mnemonic and optional password.
  *
  * Electrum predates the introduction of BIP-39 and uses a custom seed derivation method that differs
@@ -99,12 +138,13 @@ export const deriveKeyPair = (
   addressType: AddressType,
   chain: ChainType,
   index: number
-): KeyPair => {
+): { pair: KeyPair, path: string } => {
   const root = HDKey.fromMasterSeed(seed);
 
   const chainPath = chain === ChainType.External ? `0` : `1`;
 
-  const path = `${derivationPaths[addressType]}/${chainPath}/${index}`;
+  const paths = bitcoin.networks.testnet ? testnetDerivationPaths : derivationPaths;
+  const path = `${paths[addressType]}/${chainPath}/${index}`;
 
   const childNode = root.derive(path);
 
@@ -113,8 +153,10 @@ export const deriveKeyPair = (
   }
 
   return {
-    publicKey: Buffer.from(childNode.publicKey as any),
-    privateKey: Buffer.from(childNode.privateKey as any)
+    pair: {
+      publicKey: Buffer.from(childNode.publicKey as any),
+      privateKey: Buffer.from(childNode.privateKey as any)
+    }, path
   };
 };
 
@@ -128,16 +170,16 @@ export const deriveKeyPair = (
  * @param {AddressType} addressType - The address type (Legacy, SegWit, NativeSegWit, Taproot, ElectrumNativeSegWit).
  * @param {ChainType} chain - The chain type (`external` for receiving addresses or `internal` for change addresses).
  * @param {number} index - The index of the address to derive (e.g., 0 for the first address).
- * @returns {Buffer} The derived public key as a buffer.
+ * @returns The derived public key and the derivation path.
  */
 export const derivePublicKey = (
   seed: Buffer,
   addressType: AddressType,
   chain: ChainType,
   index: number
-): Buffer => {
-  const keyPair = deriveKeyPair(seed, addressType, chain, index);
-  return keyPair.publicKey;
+): { pubkey: Buffer, path: string } => {
+  const result = deriveKeyPair(seed, addressType, chain, index);
+  return { pubkey: result.pair.publicKey, path: result.path };
 };
 
 /**
@@ -150,14 +192,14 @@ export const derivePublicKey = (
  * @param {AddressType} addressType - The address type (Legacy, SegWit, NativeSegWit, Taproot, ElectrumNativeSegWit).
  * @param {ChainType} chain - The chain type (`external` for receiving addresses, `internal` for change addresses).
  * @param {number} index - The index of the address to derive (e.g., 0 for the first address).
- * @returns {Buffer} The derived private key as a buffer.
+ * @returns The derived private key and the derivation path.
  */
 export const derivePrivateKey = (
   seed: Buffer,
   addressType: AddressType,
   chain: ChainType,
   index: number
-): Buffer => {
+): { privateKey: Buffer, path: string } => {
   const keyPair = deriveKeyPair(seed, addressType, chain, index);
-  return keyPair.privateKey;
+  return { privateKey: keyPair.pair.privateKey, path: keyPair.path };
 };
