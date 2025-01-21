@@ -67,9 +67,9 @@ export class BitcoinWallet {
   private readonly pollInterval: number;
   private readonly historyDepth: number;
   private provider: BlockchainDataProvider;
-  private info: BitcoinWalletInfo;
-  private network: bitcoin.networks.Network;
 
+  public info: BitcoinWalletInfo;
+  public network: Network;
   public transactionHistory$: BehaviorSubject<TransactionHistoryEntry[]> = new BehaviorSubject(new Array<TransactionHistoryEntry>());
   public address: DerivedAddress;
   public utxos$: BehaviorSubject<UTxO[]> = new BehaviorSubject(new Array<UTxO>());
@@ -82,15 +82,15 @@ export class BitcoinWallet {
     info: BitcoinWalletInfo,
     network: Network = Network.Testnet
   ) {
-    this.network = network === Network.Mainnet ? bitcoin.networks.bitcoin : bitcoin.networks.testnet;
-
+    const bitcoinNetwork = network === Network.Mainnet ? bitcoin.networks.bitcoin : bitcoin.networks.testnet;
+    this.network = network;
     this.pollInterval = pollInterval;
     this.historyDepth = historyDepth;
     this.provider = provider;
     this.info = info;
 
     const pubKey = Buffer.from(info.publicKeyHex, 'hex');
-    const address = deriveAddressByType(pubKey, AddressType.NativeSegWit, this.network);
+    const address = deriveAddressByType(pubKey, AddressType.NativeSegWit, bitcoinNetwork);
 
     this.address =
       {
@@ -108,82 +108,6 @@ export class BitcoinWallet {
       .subscribe((balance) => {
         this.balance$.next(balance);
       });
-  }
-
-  /**
-   * Sends a transaction to the specified address.
-   *
-   * @param toAddress The recipient's address.
-   * @param amount The amount to send in satoshis.
-   */
-  async send(toAddress: string, amount: bigint): Promise<string> {
-    const fixedFee = 500n;
-
-    try {
-      const utxos = this.utxos$.value;
-
-      if (!utxos || utxos.length === 0) {
-        throw new Error('No UTXOs available to fund the transaction.');
-      }
-
-      let inputSum = BigInt(0);
-      const selectedUTxOs: UTxO[] = [];
-
-      for (const utxo of utxos) {
-        selectedUTxOs.push(utxo);
-        inputSum += utxo.amount;
-        if (inputSum >= amount + fixedFee) break;
-      }
-
-      if (inputSum < amount + fixedFee) {
-        throw new Error('Insufficient funds to cover the transaction and fees.');
-      }
-
-      const publicKey = Buffer.from(this.info.publicKeyHex, 'hex');
-      const encryptedPrivateKey = Buffer.from(this.info.encryptedPrivateKeyHex, 'hex');
-      const privateKey = Buffer.from(await emip3decrypt(new Uint8Array(encryptedPrivateKey), toUint8Array('password')));
-
-      const keyPair = { publicKey, privateKey };
-
-      const psbt = new Psbt({ network: this.network });
-
-      selectedUTxOs.forEach((utxo) => {
-        psbt.addInput({
-          hash: utxo.txId,
-          index: utxo.index,
-          witnessUtxo: {
-            script: payments.p2wpkh({ pubkey: publicKey, network: this.network }).output!,
-            value: Number(utxo.amount)
-          }
-        });
-      });
-
-      psbt.addOutput({
-        address: toAddress,
-        value: Number(amount)
-      });
-
-      const change = inputSum - amount - fixedFee;
-
-      if (change > 0n) {
-        psbt.addOutput({
-          address: this.address.address,
-          value: Number(change)
-        });
-      }
-
-      psbt.signAllInputs(new CustomSigner(keyPair));
-
-      psbt.finalizeAllInputs();
-
-      // clear secrets from memory
-      keyPair.privateKey.fill(0);
-
-      return psbt.extractTransaction().toHex();
-    } catch (error) {
-      console.error('Failed to send transaction:', error);
-      throw error;
-    }
   }
 
   /**

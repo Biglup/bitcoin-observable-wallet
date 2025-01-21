@@ -1,7 +1,7 @@
 import { MaestroBitcoinDataProvider } from './providers';
-import { BitcoinWallet } from './wallet';
+import { BitcoinSigner, BitcoinWallet, buildTx } from './wallet';
 import { AddressType, BitcoinWalletInfo, ChainType, deriveKeyPair, Network, toUint8Array } from './common';
-import { emip3encrypt } from './crypto';
+import { emip3decrypt, emip3encrypt } from './crypto';
 import * as bip39 from 'bip39';
 
 // Convert the password to Uint8Array
@@ -16,7 +16,7 @@ const walletInfo: BitcoinWalletInfo = {
 (async () => {
 // Initialize provider and wallet
   const provider = new MaestroBitcoinDataProvider('x', Network.Testnet);
-  const mnemonic = 'x'; // Insert your mnemonic here
+  const mnemonic = 's'; // Insert your mnemonic here
 
 // Create Wallet
   const seed = bip39.mnemonicToSeedSync(mnemonic);
@@ -46,7 +46,7 @@ const walletInfo: BitcoinWalletInfo = {
 
   console.log(`Address ${wallet.address.address}:, Type: ${wallet.address.addressType}, Path: ${wallet.address.derivationPath}`);
 
-  wallet.balance$.subscribe((balance) => {
+  wallet.balance$.subscribe(async (balance) => {
     console.log(`\nWallet Balance Updated: ${balance} satoshis`);
 
     // Check balance and ensure we only send once
@@ -54,14 +54,19 @@ const walletInfo: BitcoinWalletInfo = {
       console.log('\nBalance is sufficient. Preparing to send transaction...');
       hasSentTransaction = true;
 
-      wallet
-        .send(recipientAddress, amountToSend)
-        .then((tx) => {
-          console.log(`submit tx:\n ${tx}`);
-        })
-        .catch((err) => {
-          console.error('Failed to send transaction:', err.message);
-        });
+
+      const publicKey = Buffer.from(wallet.info.publicKeyHex, 'hex');
+      const encryptedPrivateKey = Buffer.from(wallet.info.encryptedPrivateKeyHex, 'hex');
+      const privateKey = Buffer.from(await emip3decrypt(new Uint8Array(encryptedPrivateKey), toUint8Array('password')));
+      const keyPair = { publicKey, privateKey };
+      const signer = new BitcoinSigner(keyPair);
+      const changeAddress = wallet.address.address;
+      const tx = buildTx(recipientAddress, changeAddress, amountToSend, 500n, wallet.utxos$.value, signer, wallet.network);
+
+      privateKey.fill(0);
+      signer.clearSecrets();
+
+      console.log(`submit tx:\n ${tx}`);
     }
   });
 
