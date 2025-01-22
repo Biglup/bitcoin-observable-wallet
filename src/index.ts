@@ -15,8 +15,8 @@ const walletInfo: BitcoinWalletInfo = {
 
 (async () => {
 // Initialize provider and wallet
-  const provider = new MaestroBitcoinDataProvider('x', Network.Testnet);
-  const mnemonic = 's'; // Insert your mnemonic here
+  const provider = new MaestroBitcoinDataProvider('', Network.Testnet);
+  const mnemonic = ''; // Insert your mnemonic here
 
 // Create Wallet
   const seed = bip39.mnemonicToSeedSync(mnemonic);
@@ -54,14 +54,15 @@ const walletInfo: BitcoinWalletInfo = {
       console.log('\nBalance is sufficient. Preparing to send transaction...');
       hasSentTransaction = true;
 
-
       const publicKey = Buffer.from(wallet.info.publicKeyHex, 'hex');
       const encryptedPrivateKey = Buffer.from(wallet.info.encryptedPrivateKeyHex, 'hex');
       const privateKey = Buffer.from(await emip3decrypt(new Uint8Array(encryptedPrivateKey), toUint8Array('password')));
       const keyPair = { publicKey, privateKey };
       const signer = new BitcoinSigner(keyPair);
       const changeAddress = wallet.address.address;
-      const tx = buildTx(recipientAddress, changeAddress, amountToSend, 500n, wallet.utxos$.value, signer, wallet.network);
+      const feeMarket = await wallet.getCurrentFeeMarket();
+
+      const tx = buildTx(recipientAddress, changeAddress, amountToSend, feeMarket.slow.feeRate, wallet.utxos$.value, signer, wallet.network);
 
       privateKey.fill(0);
       signer.clearSecrets();
@@ -70,7 +71,7 @@ const walletInfo: BitcoinWalletInfo = {
     }
   });
 
-// Listen for updates
+  // Listen for updates
   wallet.transactionHistory$.subscribe((txHistory) => {
     console.log('\nTransaction History Updated:');
     txHistory.forEach((tx, index) => {

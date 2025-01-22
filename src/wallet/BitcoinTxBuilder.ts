@@ -4,8 +4,19 @@ import { payments, Psbt } from 'bitcoinjs-lib';
 import { Network } from '../common';
 import * as bitcoin from 'bitcoinjs-lib';
 
-export const buildTx = (toAddress: string, changeAddress: string, amount: bigint, fee: bigint, utxos: UTxO[], signer: BitcoinSigner, network: Network): string => {
-  const fixedFee = fee;
+const INPUT_SIZE = 68;
+const OUTPUT_SIZE = 34;
+const TRANSACTION_OVERHEAD = 10;
+
+export const buildTx = (
+  toAddress: string,
+  changeAddress: string,
+  amount: bigint,
+  feeRate: number,
+  utxos: UTxO[],
+  signer: BitcoinSigner,
+  network: Network
+): string => {
   const net = network === Network.Mainnet ? bitcoin.networks.bitcoin : bitcoin.networks.testnet;
 
   try {
@@ -16,16 +27,26 @@ export const buildTx = (toAddress: string, changeAddress: string, amount: bigint
     let inputSum = BigInt(0);
     const selectedUTxOs: UTxO[] = [];
 
+    // Convert feeRate from BTC per kilobyte to satoshis per byte
+    const feeRateSatoshis = (feeRate * 100_000_000) / 1_000;
+
     for (const utxo of utxos) {
       selectedUTxOs.push(utxo);
       inputSum += utxo.amount;
-      if (inputSum >= amount + fixedFee) break;
+
+      const estimatedSize = (selectedUTxOs.length * INPUT_SIZE) + (2 * OUTPUT_SIZE) + TRANSACTION_OVERHEAD;
+      const fee = BigInt(Math.ceil(estimatedSize * feeRateSatoshis));
+
+      if (inputSum >= amount + fee) break;
     }
 
-    if (inputSum < amount + fixedFee) {
+    const estimatedSize = (selectedUTxOs.length * INPUT_SIZE) + (2 * OUTPUT_SIZE) + TRANSACTION_OVERHEAD;
+    const fee = BigInt(Math.ceil(estimatedSize * feeRateSatoshis));
+
+    console.log('fee:', fee);
+    if (inputSum < amount + fee) {
       throw new Error('Insufficient funds to cover the transaction and fees.');
     }
-
 
     const publicKey = signer.getPublicKey();
     const psbt = new Psbt({ network: net });
@@ -46,8 +67,7 @@ export const buildTx = (toAddress: string, changeAddress: string, amount: bigint
       value: Number(amount)
     });
 
-    const change = inputSum - amount - fixedFee;
-
+    const change = inputSum - amount - fee;
     if (change > 0n) {
       psbt.addOutput({
         address: changeAddress,
@@ -56,12 +76,11 @@ export const buildTx = (toAddress: string, changeAddress: string, amount: bigint
     }
 
     psbt.signAllInputs(signer);
-
     psbt.finalizeAllInputs();
 
     return psbt.extractTransaction().toHex();
   } catch (error) {
-    console.error('Failed to send transaction:', error);
+    console.error('Failed to build transaction:', error);
     throw error;
   }
 };

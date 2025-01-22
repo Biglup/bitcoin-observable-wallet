@@ -2,6 +2,7 @@ import axios, { AxiosInstance } from 'axios';
 import {
   BlockchainDataProvider,
   BlockInfo,
+  FeeEstimationMode,
   TransactionHistoryEntry,
   TransactionStatus,
   UTxO
@@ -12,7 +13,7 @@ import { createHash } from 'node:crypto';
 export class MaestroBitcoinDataProvider implements BlockchainDataProvider {
   private api: AxiosInstance;
 
-  constructor(token: string, network: Network = Network.Mainnet) {
+  constructor(token: string, private network: Network = Network.Mainnet) {
     this.api = axios.create({
       baseURL: `https://xbt-${network}.gomaestro-api.org/v0`,
       headers: {
@@ -53,7 +54,7 @@ export class MaestroBitcoinDataProvider implements BlockchainDataProvider {
     try {
       const response = await this.api.get(`/addresses/${address}/txs`, { params });
       const transactions = response.data.data || [];
-      const detailedTransactions = await Promise.all(
+      return await Promise.all(
         transactions.map(async (tx: any) => {
           const details = await this.getTransactionDetails(tx.tx_hash);
           return {
@@ -75,7 +76,6 @@ export class MaestroBitcoinDataProvider implements BlockchainDataProvider {
           };
         })
       );
-      return detailedTransactions;
     } catch (error: any) {
       if (error.response && error.response.status === 404) {
         return [];
@@ -159,6 +159,42 @@ export class MaestroBitcoinDataProvider implements BlockchainDataProvider {
         return TransactionStatus.Dropped;
       }
       throw new Error(`Failed to fetch transaction status: ${error.message}`);
+    }
+  }
+
+  /**
+   * Estimates the transaction fee in satoshis per byte based on the desired confirmation time and fee estimation mode.
+   *
+   * This method queries a blockchain fee estimation service to determine the appropriate fee
+   * rate required for a transaction to be confirmed within the specified number of blocks.
+   *
+   * @param {number} blocks - The target number of blocks within which the transaction should be confirmed.
+   *                          A smaller number indicates a higher priority and typically results in a higher fee.
+   *                          For example, `blocks = 1` requests a fee estimation for the next block confirmation.
+   * @param {FeeEstimationMode} mode - The fee estimation mode, which determines the trade-off between
+   *                                   reliability and cost:
+   *                                   - `FeeEstimationMode.Conservative`: Prioritizes confirmation reliability.
+   *                                   - `FeeEstimationMode.Economical`: Aims to minimize fees, with potentially slower confirmations.
+   * @returns {Promise<number>} A promise that resolves to the estimated fee in satoshis per byte.
+   *                            This value can be used to calculate the total transaction fee
+   *                            based on the size of the transaction in bytes.
+   */
+  async estimateFee(blocks: number, mode: FeeEstimationMode): Promise<{ feeRate: number, blocks: number }> {
+    try {
+      // For testnet always returns low feeRate
+      if (this.network === Network.Testnet) {
+        return { feeRate: 0.00002500, blocks };
+      }
+
+      const response = await this.api.get(`/rpc/transaction/estimatefee/${blocks}?mode=${mode}`);
+
+      if (response.status !== 200) {
+        throw new Error('Invalid response from fee estimation API.');
+      }
+      return { feeRate: response.data.data.feerate, blocks: response.data.data.blocks };
+    } catch (error: any) {
+      console.error('Error estimating fee:', error.message || error);
+      throw new Error('Failed to estimate fee. Please try again later.');
     }
   }
 

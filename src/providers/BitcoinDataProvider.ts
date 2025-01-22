@@ -10,6 +10,28 @@ export type BlockInfo = {
 };
 
 /**
+ * Enum representing the modes for estimating transaction fees.
+ *
+ * Fee estimation modes allow for flexibility in determining the trade-off
+ * between transaction cost and confirmation time.
+ */
+export enum FeeEstimationMode {
+  /**
+   * Conservative mode aims to prioritize transaction confirmation reliability.
+   * Transactions estimated using this mode are less likely to be delayed,
+   * but may incur higher fees.
+   */
+  Conservative = 'conservative',
+
+  /**
+   * Economical mode aims to minimize transaction fees, potentially
+   * sacrificing faster confirmation times for lower costs.
+   * Transactions estimated with this mode are better suited for non-urgent use cases.
+   */
+  Economical = 'economical',
+}
+
+/**
  * Represents the status of a Bitcoin transaction.
  */
 export enum TransactionStatus {
@@ -131,4 +153,25 @@ export interface BlockchainDataProvider {
    * @returns {Promise<TransactionStatus>} An observable that emits the current status of the transaction.
    */
   getTransactionStatus(txHash: string): Promise<TransactionStatus>;
+
+  /**
+   * Estimates the transaction fee in satoshis per byte based on the desired confirmation time and fee estimation mode.
+   *
+   * This method queries a blockchain fee estimation service to determine the appropriate fee
+   * rate required for a transaction to be confirmed within the specified number of blocks.
+   *
+   * @param {number} blocks - The target number of blocks within which the transaction should be confirmed.
+   *                          A smaller number indicates a higher priority and typically results in a higher fee.
+   *                          For example, `blocks = 1` requests a fee estimation for the next block confirmation.
+   * @param {FeeEstimationMode} mode - The fee estimation mode, which determines the trade-off between
+   *                                   reliability and cost:
+   *                                   - `FeeEstimationMode.Conservative`: Prioritizes confirmation reliability.
+   *                                   - `FeeEstimationMode.Economical`: Aims to minimize fees, with potentially slower confirmations.
+   * @returns {Promise<number>} A promise that resolves to the estimated fee in satoshis per byte.
+   *                            This value can be used to calculate the total transaction fee
+   *                            based on the size of the transaction in bytes.
+   *
+   * @throws {Error} If the fee estimation service is unavailable or returns an invalid response.
+   */
+  estimateFee(blocks: number, mode: FeeEstimationMode): Promise<{ feeRate: number, blocks: number }>;
 }

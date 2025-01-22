@@ -1,16 +1,15 @@
-import { BlockchainDataProvider, BlockInfo, TransactionHistoryEntry, UTxO } from './../providers';
+import { BlockchainDataProvider, BlockInfo, FeeEstimationMode, TransactionHistoryEntry, UTxO } from './../providers';
 import { BehaviorSubject, interval, of, startWith } from 'rxjs';
 import { catchError, map, switchMap } from 'rxjs/operators';
 import {
   AddressType, BitcoinWalletInfo,
   deriveAddressByType,
   DerivedAddress,
-  KeyPair, Network, toUint8Array
+  KeyPair, Network
 } from '../common';
 import * as bitcoin from 'bitcoinjs-lib';
-import { payments, Psbt, Signer } from 'bitcoinjs-lib';
+import { Signer } from 'bitcoinjs-lib';
 import * as ecc from 'tiny-secp256k1';
-import { emip3decrypt } from '../crypto';
 
 bitcoin.initEccLib(ecc);
 
@@ -61,6 +60,49 @@ export class CustomSigner implements Signer {
   }
 }
 
+/**
+ * Represents the fee market for estimating transaction fees.
+ */
+export type FeeMarket = {
+  /**
+   * The fee rate in satoshis per byte.
+   */
+  feeRate: number;
+
+  /**
+   * The confirmation target time in seconds.
+   * This represents the estimated time within which the transaction is expected to be confirmed.
+   */
+  targetConfirmationTime: number;
+};
+
+/**
+ * Represents the estimated fees for different transaction speeds.
+ *
+ * The estimated fees are categorized into three tiers: `fast`, `standard`, and `slow`.
+ * Each tier includes the fee rate (in satoshis per byte) and the expected confirmation
+ * time (in seconds).
+ */
+export type EstimatedFees = {
+  /**
+   * Fast tier: The fee and confirmation time for transactions requiring
+   * high priority and the fastest possible confirmation.
+   */
+  fast: FeeMarket;
+
+  /**
+   * Standard tier: The fee and confirmation time for transactions with
+   * average priority, balancing cost and confirmation speed.
+   */
+  standard: FeeMarket;
+
+  /**
+   * Slow tier: The fee and confirmation time for transactions with
+   * low priority, suitable for non-urgent transfers.
+   */
+  slow: FeeMarket;
+};
+
 export class BitcoinWallet {
   private lastKnownBlock: BlockInfo | null = null;
   private transactionHistory: TransactionHistoryEntry[] = [];
@@ -108,6 +150,39 @@ export class BitcoinWallet {
       .subscribe((balance) => {
         this.balance$.next(balance);
       });
+  }
+
+  /**
+   * Fetches the current fee market for estimating transaction fees.
+   */
+  public async getCurrentFeeMarket(): Promise<EstimatedFees> {
+    try {
+      const fastEstimate = await this.provider.estimateFee(1, FeeEstimationMode.Conservative);
+      const standardEstimate = await this.provider.estimateFee(3, FeeEstimationMode.Conservative);
+      const slowEstimate = await this.provider.estimateFee(6, FeeEstimationMode.Conservative);
+
+      console.log('fast:', fastEstimate);
+      console.log('standard:', standardEstimate);
+      console.log('slow:', slowEstimate);
+
+      return {
+        fast: {
+          feeRate: fastEstimate.feeRate,
+          targetConfirmationTime: fastEstimate.blocks * 10 * 60 * 60
+        },
+        standard: {
+          feeRate: standardEstimate.feeRate,
+          targetConfirmationTime: standardEstimate.blocks * 10 * 60 * 60
+        },
+        slow: {
+          feeRate: slowEstimate.feeRate,
+          targetConfirmationTime: slowEstimate.blocks * 10 * 60 * 60
+        }
+      };
+    } catch (error) {
+      console.error('Failed to fetch fee market:', error);
+      throw error;
+    }
   }
 
   /**
