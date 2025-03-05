@@ -2,6 +2,7 @@ export * from './address';
 export * from './keyDerivation';
 export * from './network';
 export * from './info';
+export * from './taproot';
 
 
 export const toUint8Array = (input: string) => {

@@ -8,12 +8,22 @@ import {
   UTxO
 } from './BitcoinDataProvider';
 import { Network } from '../common';
-import { createHash } from 'node:crypto';
+
+const SATS_IN_BTC = 100000000;
+
+const btcStringToSatoshisBigint = (btcString: string): bigint => {
+  // Split the BTC string into integer and fractional parts.
+  const [integerPart, fractionPart = ""] = btcString.split(".");
+  // Ensure the fractional part has exactly 8 digits by padding with zeros (or trimming if too long).
+  const paddedFraction = fractionPart.padEnd(8, "0").slice(0, 8);
+  // Compute satoshis: integer part * 100,000,000 plus the fractional part interpreted as an integer.
+  return (BigInt(integerPart) * BigInt(SATS_IN_BTC)) + BigInt(paddedFraction);
+}
 
 export class MaestroBitcoinDataProvider implements BlockchainDataProvider {
   private api: AxiosInstance;
 
-  constructor(token: string, private network: Network = Network.Mainnet) {
+  constructor(token: string, network: Network = Network.Mainnet) {
     this.api = axios.create({
       baseURL: `https://xbt-${network}.gomaestro-api.org/v0`,
       headers: {
@@ -52,6 +62,7 @@ export class MaestroBitcoinDataProvider implements BlockchainDataProvider {
     }
 
     try {
+      // TODO: Add caching
       const response = await this.api.get(`/addresses/${address}/txs`, { params });
       const transactions = response.data.data || [];
       return await Promise.all(
@@ -59,6 +70,8 @@ export class MaestroBitcoinDataProvider implements BlockchainDataProvider {
           const details = await this.getTransactionDetails(tx.tx_hash);
           return {
             inputs: details.inputs.map((input: any) => ({
+              txId: input.txid,
+              index: input.vout,
               address: input.address,
               satoshis: BigInt(input.satoshis)
             })),
@@ -68,11 +81,9 @@ export class MaestroBitcoinDataProvider implements BlockchainDataProvider {
             })),
             transactionHash: tx.tx_hash,
             confirmations: details.confirmations,
-            status:
-              details.confirmations > 0
-                ? TransactionStatus.Confirmed
-                : TransactionStatus.Pending,
-            blockHeight: details.height
+            status: TransactionStatus.Confirmed,
+            blockHeight: details.height,
+            timestamp: details.unix_timestamp
           };
         })
       );
@@ -83,6 +94,62 @@ export class MaestroBitcoinDataProvider implements BlockchainDataProvider {
       throw error;
     }
   }
+
+  /**
+   * Retrieves unconfirmed transactions (as transaction history entries) from the mempool for a given Bitcoin address.
+   *
+   * This function queries pending transactions associated with the specified Bitcoin address.
+   * It returns an array of transaction history entries representing UTXOs that are currently unconfirmed.
+   * Optionally, you can filter transactions to only include those observed after a specified block height.
+   *
+   * @param {string} address - The Bitcoin address or script pubkey to query for pending transactions.
+   * @param {number} [afterBlockHeight] - Optional. Only include transactions observed after this block height.
+   * @returns {Promise<TransactionHistoryEntry[]>} A promise that resolves to an array of transaction history entries from the mempool.
+   */
+  async getTransactionsInMempool(address: string, afterBlockHeight?: number): Promise<TransactionHistoryEntry[]> {
+    const params: Record<string, any> = { from: afterBlockHeight };
+
+    // TODO: Use cursor to fetch all pages.
+    // TODO: Add caching
+    try {
+      const response = await this.api.get(`/mempool/addresses/${address}/utxos`, { params });
+      const transactions = response.data.data || [];
+
+      const uniqueTransactions = transactions.filter((tx: any, index: number, self: any[]) =>
+        index === self.findIndex(item => item.txid === tx.txid)
+      );
+
+      return await Promise.all(
+        // filter and deduplicate
+        uniqueTransactions.filter((tx: any) => tx.mempool).map(async (tx: any) => {
+          const details = await this.getRpcTransactionDetails(tx.txid);
+          return {
+            inputs: details.vin.map((input: any) => ({
+              txId: input.txid,
+              index: input.vout,
+              address: input.address,
+              satoshis: btcStringToSatoshisBigint(input.value.toString())
+            })),
+            outputs: details.vout.map((output: any) => ({
+              address: output.address,
+              satoshis: btcStringToSatoshisBigint(output.value.toString())
+            })),
+            transactionHash: tx.txid,
+            confirmations: -1,
+            status: TransactionStatus.Pending,
+            blockHeight: 0,
+            timestamp: 0,
+          };
+        })
+      );
+    } catch (error: any) {
+      if (error.response && error.response.status === 404) {
+        return [];
+      }
+      throw error;
+    }
+  }
+
 
   /**
    * Fetches the unspent transaction outputs (UTxOs) associated with a specified address.
@@ -96,7 +163,7 @@ export class MaestroBitcoinDataProvider implements BlockchainDataProvider {
       return utxos.map((utxo: any) => ({
         txId: utxo.txid,
         index: parseInt(utxo.vout, 10),
-        amount: BigInt(utxo.satoshis),
+        satoshis: BigInt(utxo.satoshis),
         address: utxo.address
       }));
     } catch (error: any) {
@@ -113,10 +180,13 @@ export class MaestroBitcoinDataProvider implements BlockchainDataProvider {
    * @returns {Promise<string>} A promise that resolves with the transaction hash of the submitted transaction.
    */
   async submitTransaction(rawTransaction: string): Promise<string> {
+    const endpoint = '/rpc/transaction/submit';
+
     try {
-      const response = await this.api.post(`/rpc/transaction/submit`, { body: rawTransaction });
-      if (response.status === 200) {
-        return this.computeTransactionHash(rawTransaction);
+      const response = await this.api.post(endpoint, JSON.stringify(rawTransaction));
+
+      if (response.status === 201 && response.data) {
+        return response.data;
       } else {
         throw new Error(
           `Unexpected response status: ${response.status} - ${JSON.stringify(response.data)}`
@@ -124,16 +194,10 @@ export class MaestroBitcoinDataProvider implements BlockchainDataProvider {
       }
     } catch (error: any) {
       if (error.response) {
-        console.error('Transaction submission failed with response:', {
-          status: error.response.status,
-          data: error.response.data,
-          headers: error.response.headers
-        });
         throw new Error(
           `Transaction submission failed: ${error.response.data?.error || 'Unknown error'}`
         );
       } else {
-        console.error('Transaction submission failed with an unknown error:', error);
         throw new Error('Transaction submission failed due to an unknown error.');
       }
     }
@@ -181,11 +245,6 @@ export class MaestroBitcoinDataProvider implements BlockchainDataProvider {
    */
   async estimateFee(blocks: number, mode: FeeEstimationMode): Promise<{ feeRate: number, blocks: number }> {
     try {
-      // For testnet always returns low feeRate
-      if (this.network === Network.Testnet) {
-        return { feeRate: 0.00002500, blocks };
-      }
-
       const response = await this.api.get(`/rpc/transaction/estimatefee/${blocks}?mode=${mode}`);
 
       if (response.status !== 200) {
@@ -198,6 +257,7 @@ export class MaestroBitcoinDataProvider implements BlockchainDataProvider {
     }
   }
 
+  // TODO: unify. We can probably always use /rpc endpoint for this
   /**
    * Fetches details of a specific transaction by its hash.
    */
@@ -207,12 +267,10 @@ export class MaestroBitcoinDataProvider implements BlockchainDataProvider {
   }
 
   /**
-   * Computes the transaction hash from the raw transaction data.
+   * Fetches details of a specific transaction by its hash.
    */
-  private computeTransactionHash(rawTransaction: string): string {
-    const buffer = Buffer.from(rawTransaction, 'hex');
-    const hash1 = createHash('sha256').update(buffer).digest();
-    const hash2 = createHash('sha256').update(hash1).digest();
-    return hash2.reverse().toString('hex');
+  private async getRpcTransactionDetails(txHash: string): Promise<any> {
+    const response = await this.api.get(`/rpc/transaction/${txHash}?verbose=true`);
+    return response.data.data;
   }
 }

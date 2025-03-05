@@ -1,64 +1,20 @@
-import { BlockchainDataProvider, BlockInfo, FeeEstimationMode, TransactionHistoryEntry, UTxO } from './../providers';
-import { BehaviorSubject, interval, of, startWith } from 'rxjs';
-import { catchError, map, switchMap } from 'rxjs/operators';
+import {BlockchainDataProvider, BlockInfo, FeeEstimationMode, TransactionHistoryEntry, UTxO} from './../providers';
+import {BehaviorSubject, interval, of, startWith} from 'rxjs';
+import {catchError, map, switchMap} from 'rxjs/operators';
 import {
-  AddressType, BitcoinWalletInfo,
+  AddressType,
+  BitcoinWalletInfo, ChainType,
   deriveAddressByType,
+  deriveChildPublicKey,
   DerivedAddress,
-  KeyPair, Network
+  getNetworkKeys,
+  Network
 } from '../common';
 import * as bitcoin from 'bitcoinjs-lib';
-import { Signer } from 'bitcoinjs-lib';
-import * as ecc from 'tiny-secp256k1';
+import * as ecc from '@bitcoinerlab/secp256k1';
+import isEqual from 'lodash/isEqual';
 
 bitcoin.initEccLib(ecc);
-
-export class CustomSigner implements Signer {
-  publicKey: Buffer;
-
-  /**
-   * Creates a new CustomSigner instance.
-   * @param keyPair - The key pair to use for signing.
-   */
-  constructor(private keyPair: KeyPair) {
-    if (!keyPair.privateKey) {
-      throw new Error('Private key is required to sign transactions.');
-    }
-    this.publicKey = keyPair.publicKey;
-  }
-
-  /**
-   * Signs a hash using tiny-secp256k1's sign function.
-   * @param {Buffer} hash - The hash to sign (must be 32 bytes).
-   * @param {boolean} _lowR - Optional flag for lowR signatures (ignored here).
-   * @returns {Buffer} The signature as a buffer.
-   */
-  sign(hash: Buffer, _lowR: boolean = false): Buffer {
-    if (hash.length !== 32) {
-      throw new Error('Hash must be 32 bytes.');
-    }
-
-    const signature = ecc.sign(new Uint8Array(hash), new Uint8Array(this.keyPair.privateKey));
-    return Buffer.from(signature);
-  }
-
-  /**
-   * Returns the public key.
-   * @returns {Buffer} The public key as a buffer.
-   */
-  getPublicKey(): Buffer {
-    return this.publicKey;
-  }
-
-  /**
-   * Clears the private key from memory.
-   *
-   * This is a security measure to prevent the private key from being exposed in memory.
-   */
-  clearSecrets() {
-    this.keyPair.privateKey.fill(0);
-  }
-}
 
 /**
  * Represents the fee market for estimating transaction fees.
@@ -109,13 +65,15 @@ export class BitcoinWallet {
   private readonly pollInterval: number;
   private readonly historyDepth: number;
   private provider: BlockchainDataProvider;
-
   public info: BitcoinWalletInfo;
-  public network: Network;
-  public transactionHistory$: BehaviorSubject<TransactionHistoryEntry[]> = new BehaviorSubject(new Array<TransactionHistoryEntry>());
+  private network: Network;
   public address: DerivedAddress;
+
+  public transactionHistory$: BehaviorSubject<TransactionHistoryEntry[]> = new BehaviorSubject(new Array<TransactionHistoryEntry>());
+  public pendingTransactions$: BehaviorSubject<TransactionHistoryEntry[]> = new BehaviorSubject(new Array<TransactionHistoryEntry>());
   public utxos$: BehaviorSubject<UTxO[]> = new BehaviorSubject(new Array<UTxO>());
-  public balance$: BehaviorSubject<bigint> = new BehaviorSubject(0n);
+  public balance$: BehaviorSubject<bigint> = new BehaviorSubject(BigInt(0));
+  public addresses$: BehaviorSubject<DerivedAddress[]> = new BehaviorSubject(new Array<DerivedAddress>());
 
   constructor(
     provider: BlockchainDataProvider,
@@ -131,25 +89,55 @@ export class BitcoinWallet {
     this.provider = provider;
     this.info = info;
 
-    const pubKey = Buffer.from(info.publicKeyHex, 'hex');
+    const networkKeys = getNetworkKeys(info, network);
+    const extendedAccountPubKey = networkKeys.nativeSegWit;
+    const pubKey = deriveChildPublicKey(extendedAccountPubKey, ChainType.External, 0);
     const address = deriveAddressByType(pubKey, AddressType.NativeSegWit, bitcoinNetwork);
 
-    this.address =
-      {
-        address,
-        addressType: AddressType.NativeSegWit,
-        derivationPath: info.derivationPath
-      };
+    // Taproot
+    const extendedAccountPubKeyTaproot = networkKeys.taproot;
+    const pubKeyTaproot = deriveChildPublicKey(extendedAccountPubKeyTaproot, ChainType.External, 0);
+    const addressTaproot = deriveAddressByType(pubKeyTaproot, AddressType.Taproot, bitcoinNetwork);
+    console.log(`Address Taproot ${addressTaproot}:, Type: ${AddressType.Taproot}, Index: 0`);
 
+    // Legacy
+    const extendedAccountPubKeyLegacy = networkKeys.legacy;
+    const pubKeyLegacy = deriveChildPublicKey(extendedAccountPubKeyLegacy, ChainType.External, 0);
+    const addressLegacy = deriveAddressByType(pubKeyLegacy, AddressType.Legacy, bitcoinNetwork);
+    console.log(`Address Legacy ${addressLegacy}:, Type: ${AddressType.Legacy}, Index: 0`);
+
+    this.address = {
+      address,
+      addressType: AddressType.NativeSegWit,
+      network,
+      account: this.info.accountIndex,
+      chain: ChainType.External,
+      index: 0,
+      publicKeyHex: Buffer.from(pubKey).toString('hex')
+    };
+
+    this.addresses$.next([this.address]);
     this.startPolling();
 
     this.utxos$
       .pipe(
-        map((utxos) => utxos.reduce((total, utxo) => total + utxo.amount, 0n))
+        map((utxos) => utxos.reduce((total, utxo) => total + utxo.satoshis, BigInt(0)))
       )
       .subscribe((balance) => {
         this.balance$.next(balance);
       });
+  }
+
+  public async getInfo(): Promise<BitcoinWalletInfo> {
+    return this.info;
+  }
+
+  public async getNetwork(): Promise<Network> {
+    return this.network;
+  }
+
+  public async getAddress(): Promise<DerivedAddress> {
+    return this.address;
   }
 
   /**
@@ -157,26 +145,39 @@ export class BitcoinWallet {
    */
   public async getCurrentFeeMarket(): Promise<EstimatedFees> {
     try {
+      if (this.network === Network.Testnet) {
+        return {
+          fast: {
+            feeRate: 0.00002500,
+            targetConfirmationTime: 1
+          },
+          standard: {
+            feeRate: 0.00001500,
+            targetConfirmationTime: 3
+          },
+          slow: {
+            feeRate: 0.00001000,
+            targetConfirmationTime: 6
+          }
+        };
+      }
+
       const fastEstimate = await this.provider.estimateFee(1, FeeEstimationMode.Conservative);
       const standardEstimate = await this.provider.estimateFee(3, FeeEstimationMode.Conservative);
       const slowEstimate = await this.provider.estimateFee(6, FeeEstimationMode.Conservative);
 
-      console.log('fast:', fastEstimate);
-      console.log('standard:', standardEstimate);
-      console.log('slow:', slowEstimate);
-
       return {
         fast: {
           feeRate: fastEstimate.feeRate,
-          targetConfirmationTime: fastEstimate.blocks * 10 * 60 * 60
+          targetConfirmationTime: fastEstimate.blocks * 10 * 60
         },
         standard: {
           feeRate: standardEstimate.feeRate,
-          targetConfirmationTime: standardEstimate.blocks * 10 * 60 * 60
+          targetConfirmationTime: standardEstimate.blocks * 10 * 60
         },
         slow: {
           feeRate: slowEstimate.feeRate,
-          targetConfirmationTime: slowEstimate.blocks * 10 * 60 * 60
+          targetConfirmationTime: slowEstimate.blocks * 10 * 60
         }
       };
     } catch (error) {
@@ -217,8 +218,37 @@ export class BitcoinWallet {
 
         if (!this.lastKnownBlock || this.lastKnownBlock.hash !== latestBlockInfo.hash) {
           await this.updateState(latestBlockInfo);
+        } else {
+          await this.updatePendingTransactions();
         }
       });
+  }
+
+  private async updateTransactions() {
+    const newTxs = await this.provider.getTransactions(this.address.address, 0, this.historyDepth, 0);
+
+    if (!isEqual(newTxs, this.transactionHistory)) {
+      this.transactionHistory = newTxs;
+      this.transactionHistory$.next(this.transactionHistory);
+    }
+  }
+
+  private async updatePendingTransactions() {
+    const pendingTxs = await this.provider.getTransactionsInMempool(this.address.address);
+
+    const newPendingTxs = pendingTxs.filter((tx) => !this.transactionHistory.find((historyTx) => historyTx.transactionHash === tx.transactionHash));
+
+    if (!isEqual(newPendingTxs, this.pendingTransactions$.value)) {
+      this.pendingTransactions$.next(newPendingTxs);
+    }
+  }
+
+  private async updateUtxos() {
+    const newUtxos = await this.provider.getUTxOs(this.address.address);
+
+    if (!isEqual(newUtxos, this.utxos$.value)) {
+      this.utxos$.next(newUtxos);
+    }
   }
 
   /**
@@ -227,11 +257,10 @@ export class BitcoinWallet {
   private async updateState(latestBlockInfo: BlockInfo): Promise<void> {
     this.lastKnownBlock = latestBlockInfo;
 
-    this.transactionHistory = await this.provider.getTransactions(this.address.address, 0, this.historyDepth, 0);
-    this.transactionHistory$.next(this.transactionHistory);
+    await this.updateTransactions();
+    await this.updatePendingTransactions();
+    await this.updateUtxos();
 
-    const utxos = await this.provider.getUTxOs(this.address.address);
-    this.utxos$.next(utxos);
     this.lastKnownBlock = latestBlockInfo;
   }
 }
